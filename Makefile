@@ -15,7 +15,7 @@ EMU_PROFILE = $(EMU_PATH)/bin/emusim_profile
 
 LDFLAGS = -lemu_c_utils
 
-EXE  = dot
+EXE  = matrix
 EMU_EXE = $(EXE).mwx
 
 $(EMU_EXE) : $(EMU_OBJS)
