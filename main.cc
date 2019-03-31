@@ -22,10 +22,11 @@
   counted as a local memory operation. In this example, all the values are zero
   showing that no remote memory operations occurred.
  */
-
+#include <assert.h>
 #include <tuple>
 #include <vector>
 
+#include <cilk.h>
 #include <memoryweb.h>
 
 typedef long Index_t;
@@ -33,16 +34,13 @@ typedef long Scalar_t;
 typedef std::vector<std::tuple<Index_t,Scalar_t>> Row_t;
 typedef Row_t * pRow_t;
 
+static inline
 Index_t r_map(Index_t i) { return i / NODELETS(); } // slow running index
+static inline
 Index_t n_map(Index_t i) { return i % NODELETS(); } // fast running index
 
-int main(int argc, char* argv[])
+Row_t ** allocSparseRows(Index_t nrows, Index_t nrows_per_nodelet)
 {
-    starttiming();
-
-    Index_t nrows = 16;
-    Index_t nrows_per_nodelet = nrows + nrows % NODELETS();
-
     // NB: r is a "view 2" pointer to a Row_t
     //     r + 2 is an address on nodelet 2.
     //     r[2] will migrate to node 2 and read the value at address r + 2
@@ -66,19 +64,107 @@ int main(int argc, char* argv[])
         pRow_t rowPtr = new(&r[nid][rid]) Row_t();
     }
 
-    // Push stuff onto nodelet 0 vector
-    pRow_t rowPtr = &r[n_map(0)][r_map(0)];
-    rowPtr->push_back(std::make_tuple(0,1));
-    rowPtr->push_back(std::make_tuple(7,1));
-    rowPtr->push_back(std::make_tuple(12,1));
-    rowPtr->push_back(std::make_tuple(14,1));
+    return r;
+}
 
-    // this is an address on nodlet 7
-    rowPtr = &r[n_map(15)][r_map(15)];
+void addRow(Row_t ** r, Index_t row_idx, Row_t src)
+{
+    pRow_t rowPtr = r[n_map(row_idx)] + r_map(row_idx);
 
-    // including this line completely changes the migration pattern
-    // E. Hein guesses that this is stack spillage.
-    rowPtr->push_back(std::make_tuple(1,1));
+    for (Row_t::iterator it = src.begin(); it < src.end(); ++it)
+    {
+        rowPtr->push_back(*it);
+    }
+}
+
+Scalar_t dot(Row_t ** r, Index_t a_row_idx, Index_t b_row_idx)
+{
+
+    pRow_t a = r[n_map(a_row_idx)] + r_map(a_row_idx);
+    pRow_t b = r[n_map(b_row_idx)] + r_map(b_row_idx);
+
+    Row_t::iterator ait = a->begin();
+    Row_t::iterator bit = b->begin();
+
+    Scalar_t result = 0;
+
+    while (ait != a->end() && bit != b->end())
+    {
+        Index_t a_idx = std::get<0>(*ait);
+        Index_t b_idx = std::get<0>(*bit);
+
+        if (a_idx == b_idx)
+        {
+            result += std::get<1>(*ait) * std::get<1>(*bit);
+            ++ait;
+            ++bit;
+        }
+        else if (a_idx < b_idx)
+        {
+            ++ait;
+        }
+        else
+        {
+            ++bit;
+        }
+    }
+
+    return result;
+}
+
+int main(int argc, char* argv[])
+{
+    starttiming();
+
+    Index_t nrows = 16;
+    Index_t nrows_per_nodelet = nrows + nrows % NODELETS();
+
+    Row_t ** r = cilk_spawn allocSparseRows(nrows, nrows_per_nodelet);
+    cilk_sync;
+
+    Row_t tmpRow1;
+    tmpRow1.push_back(std::make_tuple(0,1));
+    tmpRow1.push_back(std::make_tuple(3,1));
+    tmpRow1.push_back(std::make_tuple(5,1));
+    tmpRow1.push_back(std::make_tuple(7,1));
+    tmpRow1.push_back(std::make_tuple(12,1));
+    tmpRow1.push_back(std::make_tuple(14,1));
+    tmpRow1.push_back(std::make_tuple(27,1));
+
+    Index_t row_idx = 0;
+    cilk_migrate_hint(r + n_map(row_idx));
+    cilk_spawn addRow(r, row_idx, tmpRow1);
+
+    Row_t tmpRow2;
+    tmpRow2.push_back(std::make_tuple(1,1));
+    tmpRow2.push_back(std::make_tuple(7,1));
+    tmpRow2.push_back(std::make_tuple(10,1));
+    tmpRow2.push_back(std::make_tuple(14,1));
+    tmpRow2.push_back(std::make_tuple(18,1));
+    tmpRow2.push_back(std::make_tuple(27,1));
+
+    // migrate_hint doesn't help here since tmpRow is on nodelet 0.
+    row_idx = 15;
+    cilk_migrate_hint(r + n_map(row_idx));
+    cilk_spawn addRow(r, row_idx, tmpRow2);
+    cilk_sync;
+
+    /*
+      MEMORY MAP
+      1470,2,0,0,0,0,0,14
+      0,0,2,0,0,0,0,0
+      0,0,0,2,0,0,0,0
+      0,0,0,0,2,0,0,0
+      0,0,0,0,0,2,0,0
+      0,0,0,0,0,0,2,0
+      0,0,0,0,0,0,0,2
+      17,0,0,0,0,0,0,444
+    */
+
+    Scalar_t a = cilk_spawn dot(r, 0, 15);
+    cilk_sync;
+
+    assert(a == 3);
 
     return 0;
 }

@@ -6,7 +6,8 @@ EMU_PATH = /local/devel/packages/emu-19.02
 #EMU_PATH = /home/jgwohlbier/devel/packages/emu-19.02
 EMU_CXX = $(EMU_PATH)/bin/emu-cc
 EMU_SIM = $(EMU_PATH)/bin/emusim.x
-EMU_SIM_OPTS = --short_trace
+EMU_SIM_ARGS = --short_trace
+EMU_PROFILE = $(EMU_PATH)/bin/emusim_profile
 
 EXE  = dot
 EMU_EXE = $(EXE).mwx
@@ -15,7 +16,10 @@ $(EMU_EXE) : $(EMU_OBJS)
 	$(EMU_CXX) -o $(EMU_EXE) $(EMU_OBJS) $(LDFLAGS)
 
 run : $(EMU_EXE)
-	$(EMU_SIM) $(EMU_SIM_OPTS) $(EMU_EXE)
+	$(EMU_SIM) $(EMU_SIM_ARGS) $(EMU_EXE)
+
+profile : $(EMU_EXE)
+	$(EMU_PROFILE) profile $(EMU_SIM_ARGS) -- $(EMU_EXE)
 
 %.emu.o: %.cc
 	$(EMU_CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -24,3 +28,4 @@ run : $(EMU_EXE)
 
 clean :
 	-$(RM) *~ $(OBJS) $(EMU_OBJS) $(EXE) $(EMU_EXE) *.cdc *.hdd *.vsf
+	-$(RM) -r profile
