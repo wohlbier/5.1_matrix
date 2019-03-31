@@ -39,6 +39,7 @@ Index_t r_map(Index_t i) { return i / NODELETS(); } // slow running index
 static inline
 Index_t n_map(Index_t i) { return i % NODELETS(); } // fast running index
 
+
 Row_t ** allocSparseRows(Index_t nrows, Index_t nrows_per_nodelet)
 {
     // NB: r is a "view 2" pointer to a Row_t
@@ -61,17 +62,40 @@ Row_t ** allocSparseRows(Index_t nrows, Index_t nrows_per_nodelet)
         // &r_repl[nid][rid] = r_repl[nid] + rid
 
         // migrations to do placement new on other nodelets
-        pRow_t rowPtr = new(&r[nid][rid]) Row_t();
+        pRow_t rowPtr = new(r[nid] + rid) Row_t();
     }
 
     return r;
 }
 
-void addRow(Row_t ** r, Index_t row_idx, Row_t src)
+void addRow(Row_t ** r, Index_t row_idx)
 {
+    Row_t tmpRow;
+    if (row_idx % 2 == 0)
+    {
+        tmpRow.push_back(std::make_tuple(0,1));
+        tmpRow.push_back(std::make_tuple(3,1));
+        tmpRow.push_back(std::make_tuple(5,1));
+        tmpRow.push_back(std::make_tuple(7,1));
+        tmpRow.push_back(std::make_tuple(12,1));
+        tmpRow.push_back(std::make_tuple(14,1));
+        tmpRow.push_back(std::make_tuple(27,1));
+        tmpRow.push_back(std::make_tuple(31,1));
+    }
+    else
+    {
+        tmpRow.push_back(std::make_tuple(1,1));
+        tmpRow.push_back(std::make_tuple(7,1));
+        tmpRow.push_back(std::make_tuple(10,1));
+        tmpRow.push_back(std::make_tuple(14,1));
+        tmpRow.push_back(std::make_tuple(18,1));
+        tmpRow.push_back(std::make_tuple(27,1));
+        tmpRow.push_back(std::make_tuple(28,1));
+    }
+
     pRow_t rowPtr = r[n_map(row_idx)] + r_map(row_idx);
 
-    for (Row_t::iterator it = src.begin(); it < src.end(); ++it)
+    for (Row_t::iterator it = tmpRow.begin(); it < tmpRow.end(); ++it)
     {
         rowPtr->push_back(*it);
     }
@@ -122,49 +146,47 @@ int main(int argc, char* argv[])
     Row_t ** r = cilk_spawn allocSparseRows(nrows, nrows_per_nodelet);
     cilk_sync;
 
-    Row_t tmpRow1;
-    tmpRow1.push_back(std::make_tuple(0,1));
-    tmpRow1.push_back(std::make_tuple(3,1));
-    tmpRow1.push_back(std::make_tuple(5,1));
-    tmpRow1.push_back(std::make_tuple(7,1));
-    tmpRow1.push_back(std::make_tuple(12,1));
-    tmpRow1.push_back(std::make_tuple(14,1));
-    tmpRow1.push_back(std::make_tuple(27,1));
+    Index_t row_idx_1 = 2; // row on nodelet 2
+    cilk_migrate_hint(r + n_map(row_idx_1));
+    cilk_spawn addRow(r, row_idx_1);
 
-    Index_t row_idx = 0;
-    cilk_migrate_hint(r + n_map(row_idx));
-    cilk_spawn addRow(r, row_idx, tmpRow1);
-
-    Row_t tmpRow2;
-    tmpRow2.push_back(std::make_tuple(1,1));
-    tmpRow2.push_back(std::make_tuple(7,1));
-    tmpRow2.push_back(std::make_tuple(10,1));
-    tmpRow2.push_back(std::make_tuple(14,1));
-    tmpRow2.push_back(std::make_tuple(18,1));
-    tmpRow2.push_back(std::make_tuple(27,1));
-
-    // migrate_hint doesn't help here since tmpRow is on nodelet 0.
-    row_idx = 15;
-    cilk_migrate_hint(r + n_map(row_idx));
-    cilk_spawn addRow(r, row_idx, tmpRow2);
+    Index_t row_idx_2 = 13; // row on nodelet 5
+    cilk_migrate_hint(r + n_map(row_idx_2));
+    cilk_spawn addRow(r, row_idx_2);
     cilk_sync;
 
+    // up to this point, no migrations between nodelets 2 and 5
+    
     /*
       MEMORY MAP
-      1470,2,0,0,0,0,0,14
+      281,2,1,0,0,1,0,0
       0,0,2,0,0,0,0,0
-      0,0,0,2,0,0,0,0
+      2,0,1315,2,0,0,0,0
       0,0,0,0,2,0,0,0
       0,0,0,0,0,2,0,0
-      0,0,0,0,0,0,2,0
+      2,0,0,0,0,1272,2,0
       0,0,0,0,0,0,0,2
-      17,0,0,0,0,0,0,444
+      2,0,0,0,0,0,0,0
     */
 
-    Scalar_t a = cilk_spawn dot(r, 0, 15);
+    cilk_migrate_hint(r + n_map(row_idx_1));
+    Scalar_t a = cilk_spawn dot(r, row_idx_1, row_idx_2);
     cilk_sync;
 
     assert(a == 3);
 
+    // profiler shows proper ping pong behavior between 2 and 5
+    /*
+      MEMORY MAP
+      336,2,2,0,0,1,0,0
+      0,0,2,0,0,0,0,0
+      3,0,1365,2,0,13,0,0
+      0,0,0,0,2,0,0,0
+      0,0,0,0,0,2,0,0
+      3,0,12,0,0,1321,2,0
+      0,0,0,0,0,0,0,2
+      2,0,0,0,0,0,0,0
+     */
+    
     return 0;
 }
