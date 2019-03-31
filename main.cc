@@ -143,26 +143,12 @@ int main(int argc, char* argv[])
     cilk_spawn B.addRow(row_idx_2);
     cilk_sync;
 
-//    // up to this point, no migrations between nodelets 2 and 5
-//    
-//    /*
-//      MEMORY MAP
-//      281,2,1,0,0,1,0,0
-//      0,0,2,0,0,0,0,0
-//      2,0,1315,2,0,0,0,0
-//      0,0,0,0,2,0,0,0
-//      0,0,0,0,0,2,0,0
-//      2,0,0,0,0,1272,2,0
-//      0,0,0,0,0,0,0,2
-//      2,0,0,0,0,0,0,0
-//    */
-//
 //    cilk_migrate_hint(r + n_map(row_idx_1));
 //    Scalar_t a = cilk_spawn dot(r, row_idx_1, row_idx_2);
 //    cilk_sync;
-//
+
 //    assert(a == 3);
-//
+
 //    // profiler shows proper ping pong behavior between 2 and 5
 //    /*
 //      MEMORY MAP
