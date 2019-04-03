@@ -7,46 +7,52 @@
 
 typedef long Index_t;
 typedef long Scalar_t;
-typedef std::vector<std::tuple<Index_t,Scalar_t>> Row_t;
-typedef Row_t * pRow_t;
 
-static inline
-Index_t r_map(Index_t i) { return i / NODELETS(); } // slow running index
-static inline
-Index_t n_map(Index_t i) { return i % NODELETS(); } // fast running index
-
-class Matrix_t
+/*
+ * Overrides default new to always allocate replicated storage for instances
+ * of this class. repl_new is intended to be used as a parent class for
+ * distributed data structure types.
+ */
+class repl_new
 {
 public:
-    // c-tor
-    Matrix_t(Index_t nrows)
-        : nrows_(nrows)
+    // Overrides default new to always allocate replicated storage for
+    // instances of this class
+    static void *
+    operator new(std::size_t sz)
     {
-        nrows_per_nodelet_ = nrows_ + nrows_ % NODELETS();
-
-        // allocate Row_t's
-        row_block_ = (Row_t **)mw_malloc2d(NODELETS(),
-                                           nrows_per_nodelet_ * sizeof(Row_t));
-
-        // placement new Row_t's
-        for (Index_t irow = 0; irow < nrows_; ++irow)
-        {
-            size_t nid(n_map(irow));
-            size_t rid(r_map(irow));
-
-            // migrations to do placement new on other nodelets
-            pRow_t rowPtr = new(row_block_[nid] + rid) Row_t();
-            assert(rowPtr);
-        }
+        return mw_mallocrepl(sz);
     }
 
-    // d-tor
-    ~Matrix_t()
+    // Overrides default delete to safely free replicated storage
+    static void
+    operator delete(void * ptr)
     {
-        mw_free(row_block_);
+        mw_free(ptr);
+    }
+};
+
+typedef std::vector<std::tuple<Index_t,Scalar_t>> Row_t;
+typedef Row_t * pRow_t;
+typedef pRow_t * ppRow_t;
+
+class Matrix_t : public repl_new
+{
+public:
+    static Matrix_t * create(Index_t nrows)
+    {
+        return new Matrix_t(nrows);
     }
 
-    void addRow(Index_t row_idx)
+    Matrix_t() = delete;
+    Matrix_t(const Matrix_t &) = delete;
+    Matrix_t & operator=(const Matrix_t &) = delete;
+    Matrix_t(Matrix_t &&) = delete;
+    Matrix_t & operator=(Matrix_t &&) = delete;
+
+    // fake build function to watch migrations when adding rows
+    // using replicated classes
+    void build(Index_t row_idx)
     {
         Row_t tmpRow;
         if (row_idx % 2 == 0)
@@ -71,7 +77,8 @@ public:
             tmpRow.push_back(std::make_tuple(28,1));
         }
 
-        pRow_t rowPtr = row_block_[n_map(row_idx)] + r_map(row_idx);
+        // bc of replication this does not cause migration
+        pRow_t rowPtr = rows_[row_idx];
 
         for (Row_t::iterator it = tmpRow.begin(); it < tmpRow.end(); ++it)
         {
@@ -79,23 +86,49 @@ public:
         }
     }
 
+    pRow_t getrow(Index_t i) { return rows_[i]; }
+
     Index_t * nodelet_addr(Index_t i)
     {
-        return (Index_t *)(row_block_ + n_map(i));
+        // dereferencing causes migrations
+        return (Index_t *)(rows_ + i);
     }
     
 private:
+    Matrix_t(Index_t nrows) : nrows_(nrows)
+    {
+        nrows_per_nodelet_ = nrows_ + nrows_ % NODELETS();
+
+        rows_ = (ppRow_t)mw_malloc1dlong(nrows_);
+
+        // replicate the class across nodelets
+        for (Index_t i = 1; i < NODELETS(); ++i)
+        {
+            memcpy(mw_get_nth(this, i), mw_get_nth(this, 0), sizeof(*this));
+        }
+
+        // local mallocs on each nodelet
+        for (Index_t i = 0; i < nrows_; ++i)
+        {
+            cilk_migrate_hint(rows_ + i);
+            cilk_spawn allocateRow(i);
+        }
+        cilk_sync;
+    }
+
+    // localalloc a single row
+    void allocateRow(Index_t i)
+    {
+        rows_[i] = new Row_t(); // allocRow must be spawned on correct nlet
+    }
+
     Index_t nrows_;
     Index_t nrows_per_nodelet_;
-    Row_t ** row_block_;
+    ppRow_t rows_;
 };
 
-
-Scalar_t dot(Row_t ** r, Index_t a_row_idx, Index_t b_row_idx)
+Scalar_t dot(pRow_t a, pRow_t b)
 {
-
-    pRow_t a = r[n_map(a_row_idx)] + r_map(a_row_idx);
-    pRow_t b = r[n_map(b_row_idx)] + r_map(b_row_idx);
 
     Row_t::iterator ait = a->begin();
     Row_t::iterator bit = b->begin();
@@ -132,35 +165,86 @@ int main(int argc, char* argv[])
 
     Index_t nrows = 16;
 
-    Matrix_t A(nrows), B(nrows);
+    // 2 migrations from:     0 => 1...7  (round robin)
+    // 4 migrations from: 1...7 => 0
+    // - 2 from main thread returning from each nodelet
+    // - 2 from each spawned thread returning from each nodelet
+    Matrix_t * A = Matrix_t::create(nrows);
+
+    // double migrations from above
+    // 4 migrations from:     0 => 1...7
+    // 8 migrations from: 1...7 => 0
+    Matrix_t * B = Matrix_t::create(nrows);
 
     Index_t row_idx_1 = 2; // row on nodelet 2
-    cilk_migrate_hint(A.nodelet_addr(row_idx_1));
-    cilk_spawn A.addRow(row_idx_1);
+    cilk_migrate_hint(A->nodelet_addr(row_idx_1));
+    // adds one migration  0 => 2
+    // adds two migrations 2 => 0
+    cilk_spawn A->build(row_idx_1);
+    /*
+      MEMORY MAP
+      2359,4,5,4,4,4,4,4
+      8,234,0,0,0,0,0,0
+      10,0,1556,0,0,0,0,0
+      8,0,0,234,0,0,0,0
+      8,0,0,0,234,0,0,0
+      8,0,0,0,0,234,0,0
+      8,0,0,0,0,0,234,0
+      8,0,0,0,0,0,0,234
+    */
 
     Index_t row_idx_2 = 13; // row on nodelet 5
-    cilk_migrate_hint(B.nodelet_addr(row_idx_2));
-    cilk_spawn B.addRow(row_idx_2);
+    cilk_migrate_hint(B->nodelet_addr(row_idx_2));
+    // adds one migration 2 => 5
+    // adds one migration 5 => 2
+    // adds one migration 5 => 0
+    cilk_spawn B->build(row_idx_2);
+    /*
+      2332,4,5,4,4,4,4,4
+      8,234,0,0,0,0,0,0
+      10,0,1607,0,0,1,0,0
+      8,0,0,234,0,0,0,0
+      8,0,0,0,234,0,0,0
+      9,0,1,0,0,1513,0,0
+      8,0,0,0,0,0,234,0
+      8,0,0,0,0,0,0,234
+    */
+
     cilk_sync;
 
-//    cilk_migrate_hint(r + n_map(row_idx_1));
-//    Scalar_t a = cilk_spawn dot(r, row_idx_1, row_idx_2);
-//    cilk_sync;
+    // changes migration pattern.
+    // - adds    0 => 5
+    // - removes 2 => 5
+    // - adds    5 => 0
+    // - removes 5 => 2
+    cilk_migrate_hint(A->nodelet_addr(row_idx_1));
+    /*
+      2408,4,5,4,4,5,4,4
+      8,234,0,0,0,0,0,0
+      10,0,1556,0,0,0,0,0
+      8,0,0,234,0,0,0,0
+      8,0,0,0,234,0,0,0
+      10,0,0,0,0,1513,0,0
+      8,0,0,0,0,0,234,0
+      8,0,0,0,0,0,0,234
+    */
 
-//    assert(a == 3);
+    Scalar_t a = cilk_spawn dot(A->getrow(row_idx_1), B->getrow(row_idx_2));
+    cilk_sync;
 
-//    // profiler shows proper ping pong behavior between 2 and 5
-//    /*
-//      MEMORY MAP
-//      336,2,2,0,0,1,0,0
-//      0,0,2,0,0,0,0,0
-//      3,0,1365,2,0,13,0,0
-//      0,0,0,0,2,0,0,0
-//      0,0,0,0,0,2,0,0
-//      3,0,12,0,0,1321,2,0
-//      0,0,0,0,0,0,0,2
-//      2,0,0,0,0,0,0,0
-//     */
+    // proper ping pong behavior between 2 and 5
+    /*
+      2380,4,6,4,4,5,4,4
+      8,234,0,0,0,0,0,0
+      12,0,1613,0,0,13,0,0
+      8,0,0,234,0,0,0,0
+      8,0,0,0,234,0,0,0
+      10,0,13,0,0,1517,0,0
+      8,0,0,0,0,0,234,0
+      8,0,0,0,0,0,0,234
+     */
+
+    assert(a == 3);
     
     return 0;
 }
