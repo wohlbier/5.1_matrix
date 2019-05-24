@@ -25,6 +25,7 @@ run : $(EMU_EXE)
 	$(EMU_SIM) $(EMU_SIM_ARGS) $(EMU_EXE)
 
 profile : $(EMU_EXE)
+	CORE_CLK_MHZ=175 \
 	$(EMU_PROFILE) profile $(EMU_SIM_ARGS) -- $(EMU_EXE)
 
 %.emu.o: %.cc
