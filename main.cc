@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <iostream>
 #include <tuple>
 #include <vector>
 
@@ -59,8 +60,10 @@ public:
 
     // fake build function to watch migrations when adding rows
     // using replicated classes
-    void build(Index_t row_idx)
+    void build(Index_t row_idx, Index_t *nid)
     {
+        *nid = NODE_ID(); // record what nodelet this started on
+
         Row_t tmpRow;
         if (row_idx % 2 == 0)
         {
@@ -137,13 +140,30 @@ private:
     ppRow_t rows_;
 };
 
-Scalar_t dot(pRow_t a, pRow_t b)
+Scalar_t dot(pRow_t a, Index_t r1, pRow_t b, Index_t r2, pRow_t scratch)
 {
+
+#define TESTING 1
+
+#if TESTING
+    Index_t nla = n_map(r1);
+    Index_t bsz = b->size();
+
+    // If you comment out this line the migrations from nodelet 2 to
+    // 5, and then subsequently 6 and 7 go away. Not sure why a resize
+    // on this nodelet local instance results in those migrations.
+    (scratch + nla)->resize(bsz);
+#endif
+
+    Scalar_t result = 0;
+
+#if !TESTING
+    memcpy((scratch + nla)->data(), b->data(),
+           bsz*sizeof(std::tuple<Index_t, Scalar_t>));
+    b = scratch + nla;
 
     Row_t::iterator ait = a->begin();
     Row_t::iterator bit = b->begin();
-
-    Scalar_t result = 0;
 
     while (ait != a->end() && bit != b->end())
     {
@@ -165,15 +185,21 @@ Scalar_t dot(pRow_t a, pRow_t b)
             ++bit;
         }
     }
+#endif
 
     return result;
+}
+
+void alloc_scratch(pRow_t s, Index_t i)
+{
+    new(s + i) Row_t();
 }
 
 int main(int argc, char* argv[])
 {
     Scalar_t a = 0;
     Index_t nrows = 16;
-    hooks_region_begin("GBTL_Matrix_Build");
+    //hooks_region_begin("GBTL_Matrix_Build");
 
     /*
       Nodelets start at 0 and end at 7
@@ -236,8 +262,9 @@ int main(int argc, char* argv[])
       Hence there is one additional migration from 0..2 and two
       additional migrations from 2..0
     */
+    Index_t nidA = 0;
     cilk_migrate_hint(A->nodelet_addr(row_idx_1));
-    cilk_spawn A->build(row_idx_1);
+    cilk_spawn A->build(row_idx_1, &nidA);
     /*
       MEMORY MAP
       7282,2,3,2,2,2,2,2
@@ -258,9 +285,13 @@ int main(int argc, char* argv[])
       Hence there is one additional migration from 0..5 and two
       additional migrations from 5..0
     */
+    Index_t nidB = 0;
     cilk_migrate_hint(B->nodelet_addr(row_idx_2));
-    cilk_spawn B->build(row_idx_2);
+    cilk_spawn B->build(row_idx_2, &nidB);
     cilk_sync;
+
+    std::cerr << "A->build started on nid: " << nidA << std::endl;
+    std::cerr << "B->build started on nid: " << nidB << std::endl;
 
     /*
       MEMORY MAP
@@ -281,13 +312,29 @@ int main(int argc, char* argv[])
       Hence there is one additional migration from 0..2, one
       additional migrations from 2..0 and one additional migration
       fron 5..0
-    */	
-    cilk_migrate_hint(A->nodelet_addr(row_idx_1));
-    a = cilk_spawn dot(A->getrow(row_idx_1), B->getrow(row_idx_2));
+    */
+    hooks_region_begin("dot");
+
+    // allocate a scratch row on each nodelet
+    pRow_t scratch = (pRow_t)mw_malloc2d(NODELETS(), sizeof(Row_t));
+    for (Index_t i = 0; i < NODELETS(); ++i)
+    {
+        cilk_migrate_hint(A->nodelet_addr(i));
+        cilk_spawn alloc_scratch(scratch, i);
+    }
     cilk_sync;
 
-    assert(a == 3);
+    // migrate to nodelet 2
+    cilk_migrate_hint(A->nodelet_addr(row_idx_1));
+    a = cilk_spawn dot(A->getrow(row_idx_1), row_idx_1,
+                       B->getrow(row_idx_2), row_idx_2, scratch);
+    cilk_sync;
 
+    std::cerr << "a: " << a << std::endl;
+
+#if !TESTING
+    assert(a == 3);
+#endif
     /*
       MEMORY MAP
       7382,2,4,2,2,3,2,2
@@ -298,7 +345,7 @@ int main(int argc, char* argv[])
       7,0,12,0,0,1342,0,0
       4,0,0,0,0,0,20,0
       4,0,0,0,0,0,0,20
-    */    
+    */
     hooks_region_end();
     return 0;
 }

@@ -8,8 +8,15 @@ EMU_CXX = $(EMU_PATH)/bin/emu-cc
 EMU_SIM = $(EMU_PATH)/bin/emusim.x
 
 EMU_SIM_ARGS =
-EMU_SIM_ARGS += --short_trace
+#EMU_SIM_ARGS += --model_4nodelet_hw
+#EMU_SIM_ARGS += --chick_box
+#EMU_SIM_ARGS += -m 34
+
+#EMU_SIM_ARGS += --verbose_isa
+#EMU_SIM_ARGS += --verbose_tid
+#EMU_SIM_ARGS += --short_trace
 #EMU_SIM_ARGS += --memory_trace
+EMU_SIM_ARGS += --capture_timing_queues
 
 EMU_PROFILE = $(EMU_PATH)/bin/emusim_profile
 
