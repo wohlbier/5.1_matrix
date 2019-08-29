@@ -140,30 +140,22 @@ private:
     ppRow_t rows_;
 };
 
-Scalar_t dot(pRow_t a, Index_t r1, pRow_t b, Index_t r2, pRow_t scratch)
+Scalar_t dot(pRow_t a, pRow_t b, pRow_t s)
 {
-
-#define TESTING 1
-
-#if TESTING
-    Index_t nla = n_map(r1);
+    // migrate to get size of b
     Index_t bsz = b->size();
-
-    // If you comment out this line the migrations from nodelet 2 to
-    // 5, and then subsequently 6 and 7 go away. Not sure why a resize
-    // on this nodelet local instance results in those migrations.
-    (scratch + nla)->resize(bsz);
-#endif
-
-    Scalar_t result = 0;
-
-#if !TESTING
-    memcpy((scratch + nla)->data(), b->data(),
+    // migrate back to resize s
+    s->resize(bsz);
+    // copy data from b to s
+    memcpy(s->data(), b->data(),
            bsz*sizeof(std::tuple<Index_t, Scalar_t>));
-    b = scratch + nla;
+    // reassign local b to be s
+    b = s;
 
     Row_t::iterator ait = a->begin();
     Row_t::iterator bit = b->begin();
+
+    Scalar_t result = 0;
 
     while (ait != a->end() && bit != b->end())
     {
@@ -185,14 +177,8 @@ Scalar_t dot(pRow_t a, Index_t r1, pRow_t b, Index_t r2, pRow_t scratch)
             ++bit;
         }
     }
-#endif
 
     return result;
-}
-
-void alloc_scratch(pRow_t s, Index_t i)
-{
-    new(s + i) Row_t();
 }
 
 int main(int argc, char* argv[])
@@ -313,28 +299,18 @@ int main(int argc, char* argv[])
       additional migrations from 2..0 and one additional migration
       fron 5..0
     */
+    Matrix_t * S = Matrix_t::create(nrows); // Scratch matrix
+
     hooks_region_begin("dot");
-
-    // allocate a scratch row on each nodelet
-    pRow_t scratch = (pRow_t)mw_malloc2d(NODELETS(), sizeof(Row_t));
-    for (Index_t i = 0; i < NODELETS(); ++i)
-    {
-        cilk_migrate_hint(A->nodelet_addr(i));
-        cilk_spawn alloc_scratch(scratch, i);
-    }
-    cilk_sync;
-
-    // migrate to nodelet 2
+    // migrate to nodelet 2, sending in scratch row
     cilk_migrate_hint(A->nodelet_addr(row_idx_1));
-    a = cilk_spawn dot(A->getrow(row_idx_1), row_idx_1,
-                       B->getrow(row_idx_2), row_idx_2, scratch);
+    a = cilk_spawn dot(A->getrow(row_idx_1), B->getrow(row_idx_2),
+                       S->getrow(row_idx_1));
     cilk_sync;
 
     std::cerr << "a: " << a << std::endl;
-
-#if !TESTING
     assert(a == 3);
-#endif
+
     /*
       MEMORY MAP
       7382,2,4,2,2,3,2,2
